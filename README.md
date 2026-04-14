@@ -44,40 +44,28 @@ cp scores.example.json scores.json
 ## Estrategia de ramas
 
 ```
-main
-├── prod                  ← código estable en producción
-│   └── feature/<nombre>  ← nuevas features para prod
-└── devops                ← infraestructura, scripts, CI/CD
-    └── feature/<nombre>  ← features de devops/infra
+main              ← proyecto base / referencia
+feature/<nombre>  ← desarrollo de cambios
+      ↓
+   devops         ← integración y ajustes
+      ↓
+    prod          ← despliegue a producción
 ```
 
 ### Flujo de trabajo
 
 | Rama | Propósito |
 |------|-----------|
-| `main` | Base inicial del proyecto |
-| `prod` | Código desplegado / estable |
-| `prod/feature/<nombre>` | Desarrollo de nuevas funcionalidades |
-| `devops` | Scripts, automatización, CI/CD |
-| `devops/feature/<nombre>` | Mejoras de infraestructura |
+| `main` | Proyecto base, referencia estable |
+| `feature/<nombre>` | Desarrollo de nuevas funcionalidades o fixes |
+| `devops` | Integración, pruebas y ajustes antes de producción |
+| `prod` | Código desplegado en producción |
 
-**Para una nueva feature de juego:**
-```bash
-git checkout prod
-git checkout -b feature/nombre-feature
-# ... desarrollar ...
-git push origin feature/nombre-feature
-# Abrir Pull Request → prod
-```
-
-**Para una nueva feature de devops:**
-```bash
-git checkout devops
-git checkout -b devops/feature/nombre-feature
-# ... desarrollar ...
-git push origin devops/feature/nombre-feature
-# Abrir Pull Request → devops
-```
+**Para cualquier cambio:**
+1. Crear rama `feature/` desde `main`
+2. Desarrollar el cambio ahí
+3. Merge a `devops` para integración y pruebas
+4. Merge a `prod` para despliegue final
 
 ---
 
