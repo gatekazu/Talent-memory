@@ -1,0 +1,33 @@
+# Credenciales y datos sensibles
+password.txt
+
+# Scores locales (cada entorno maneja los suyos)
+scores.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.env
+.venv
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editores
+.vscode/settings.json
+*.swp
+*.swo
+*~
+
+# Kiro (specs y configuración local — opcional incluir)
+# Descomenta si no quieres subir los specs de Kiro:
+# .kiro/

@@ -1,0 +1,1371 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Unified Scoreboard — Preservation Property Tests</title>
+  <style>
+    body {
+      font-family: monospace;
+      background: #0a0a0a;
+      color: #00ff41;
+      padding: 2rem;
+      line-height: 1.6;
+    }
+    h1 { color: #00ffff; margin-bottom: 0.5rem; font-size: 1.1rem; }
+    h2 { color: #ffff00; margin: 1.5rem 0 0.5rem; font-size: 0.9rem; }
+    .suite { border: 1px solid #333; padding: 1rem; margin-bottom: 1.5rem; }
+    .test { padding: 0.4rem 0; border-bottom: 1px solid #1a1a1a; }
+    .test:last-child { border-bottom: none; }
+    .pass { color: #00ff41; }
+    .fail { color: #ff4444; font-weight: bold; }
+    .label { color: #aaa; }
+    .counterexample {
+      background: #1a0000;
+      border-left: 3px solid #ff4444;
+      padding: 0.5rem 0.75rem;
+      margin: 0.25rem 0 0.5rem 1rem;
+      font-size: 0.85em;
+      color: #ff8888;
+    }
+    .detail {
+      background: #001a00;
+      border-left: 3px solid #00ff41;
+      padding: 0.5rem 0.75rem;
+      margin: 0.25rem 0 0.5rem 1rem;
+      font-size: 0.85em;
+      color: #88ff88;
+    }
+    .summary {
+      border: 2px solid #ffff00;
+      padding: 1rem;
+      margin-top: 2rem;
+      background: #0a0a00;
+    }
+    .summary h2 { margin-top: 0; }
+    .note { color: #888; font-size: 0.8em; margin-top: 0.25rem; }
+    .tag { color: #ff00ff; font-size: 0.75em; }
+  </style>
+</head>
+<body>
+  <h1>&#9654; UNIFIED SCOREBOARD — PRESERVATION PROPERTY TESTS</h1>
+  <p class="note">
+    Tareas 2 y 3.5 del bugfix workflow — spec: unified-scoreboard.<br>
+    Sección A: comportamiento BASE (localStorage-based) — debe PASAR ✅ (baseline confirmado).<br>
+    Sección B: implementación CORREGIDA (fetch-based) — debe PASAR ✅ (sin regresiones).<br>
+    <strong style="color:#00ff41">RESULTADO ESPERADO: Todas las pruebas de ambas secciones muestran PASS.</strong>
+  </p>
+
+  <div id="results-a"></div>
+  <div id="results-b"></div>
+  <div id="summary"></div>
+
+  <script>
+    // =========================================================
+    // Mini test runner — async-aware (mismo patrón que leaderboard.bug.test.html)
+    // =========================================================
+    const suitesA = [];  // Sección A: localStorage-based
+    const suitesB = [];  // Sección B: fetch-based (implementación corregida)
+    let currentSuites = suitesA;
+    let currentSuite = null;
+
+    function describe(name, fn) {
+      currentSuite = { name, tests: [] };
+      currentSuites.push(currentSuite);
+      fn();
+    }
+
+    function it(name, fn) {
+      const maybePromise = (() => {
+        try { return fn(); } catch (e) { return Promise.reject(e); }
+      })();
+
+      if (maybePromise && typeof maybePromise.then === 'function') {
+        currentSuite.tests.push({
+          name, passed: false, error: null, counterexample: null, detail: null,
+          _promise: maybePromise.then(result => {
+            if (result && typeof result === 'object' && 'passed' in result) {
+              return { passed: result.passed, counterexample: result.counterexample || null, detail: result.detail || null, error: null };
+            }
+            return { passed: result !== false, counterexample: null, detail: null, error: null };
+          }).catch(e => ({ passed: false, counterexample: null, detail: null, error: e.message }))
+        });
+        return;
+      }
+
+      // Sync test
+      let passed = false, error = null, counterexample = null, detail = null;
+      try {
+        const result = maybePromise;
+        if (result && typeof result === 'object' && 'passed' in result) {
+          passed = result.passed;
+          counterexample = result.counterexample || null;
+          detail = result.detail || null;
+        } else {
+          passed = result !== false;
+        }
+      } catch (e) {
+        error = e.message;
+        passed = false;
+      }
+      currentSuite.tests.push({ name, passed, error, counterexample, detail });
+    }
+
+    // =========================================================
+    // Mock localStorage factory
+    // Cada instancia tiene su propio almacenamiento completamente aislado.
+    // Copia fiel de createMockStorage() en leaderboard.bug.test.html.
+    // =========================================================
+    function createMockStorage() {
+      const store = {};
+      return {
+        getItem(key) {
+          return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null;
+        },
+        setItem(key, value) {
+          store[key] = String(value);
+        },
+        removeItem(key) {
+          delete store[key];
+        },
+        clear() {
+          for (const k in store) delete store[k];
+        },
+        _store: store
+      };
+    }
+
+    // =========================================================
+    // LeaderboardManager factory
+    // Copia fiel de createLeaderboardManager() en leaderboard.bug.test.html.
+    // Implementación ORIGINAL (localStorage-based, sin fix).
+    // =========================================================
+    function createLeaderboardManager(mockStorage) {
+      const STORAGE_KEY = 'memorama_leaderboard';
+      const MAX_ENTRIES = 10;
+      const CLEAR_PASSWORD = '!Talentland';
+
+      function _load() {
+        try {
+          return JSON.parse(mockStorage.getItem(STORAGE_KEY) || '[]');
+        } catch (e) {
+          return [];
+        }
+      }
+
+      function _save(entries) {
+        try {
+          mockStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+        } catch (e) { /* silenciar errores de cuota */ }
+      }
+
+      return {
+        getAll() {
+          return _load();
+        },
+        qualifies(score) {
+          const entries = _load();
+          return entries.length < MAX_ENTRIES || score > entries[entries.length - 1].score;
+        },
+        insert(entry) {
+          const entries = _load();
+          entries.push(entry);
+          entries.sort((a, b) => b.score - a.score);
+          if (entries.length > MAX_ENTRIES) entries.pop();
+          _save(entries);
+          return entries.findIndex(e =>
+            e === entry ||
+            (e.mote === entry.mote && e.score === entry.score && e.date === entry.date)
+          ) + 1;
+        },
+        clear(password) {
+          if (password !== CLEAR_PASSWORD) return false;
+          _save([]);
+          return true;
+        },
+        getRank(score) {
+          const entries = _load();
+          if (entries.length < MAX_ENTRIES || score > entries[entries.length - 1].score) {
+            const idx = entries.findIndex(e => e.score <= score);
+            return idx === -1 ? entries.length + 1 : idx + 1;
+          }
+          return null;
+        }
+      };
+    }
+
+    // =========================================================
+    // Helpers de generación aleatoria
+    // =========================================================
+    function randInt(min, max) {
+      return min + Math.floor(Math.random() * (max - min + 1));
+    }
+
+    function randMote() {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+      return chars[randInt(0, 25)] + chars[randInt(0, 25)] + chars[randInt(0, 25)];
+    }
+
+    function randDate() {
+      const y = 2024 + randInt(0, 1);
+      const m = String(randInt(1, 12)).padStart(2, '0');
+      const d = String(randInt(1, 28)).padStart(2, '0');
+      return `${y}-${m}-${d}`;
+    }
+
+    function randEntry(score) {
+      return { mote: randMote(), score: score !== undefined ? score : randInt(1, 9999), date: randDate() };
+    }
+
+    // Genera N entradas con scores únicos en rango [1, 9999]
+    function randEntries(n) {
+      const scores = new Set();
+      while (scores.size < n) scores.add(randInt(1, 9999));
+      return Array.from(scores).map(s => randEntry(s));
+    }
+
+    // Mezcla un array (Fisher-Yates)
+    function shuffle(arr) {
+      const a = arr.slice();
+      for (let i = a.length - 1; i > 0; i--) {
+        const j = randInt(0, i);
+        [a[i], a[j]] = [a[j], a[i]];
+      }
+      return a;
+    }
+
+    // =========================================================
+    // PROPERTY 2a — Top-10 cap + orden DESC
+    // Validates: Requirements 3.1, 3.2
+    //
+    // Para cualquier lista de N entradas (N > 10) insertadas en orden
+    // aleatorio, getAll() retorna exactamente 10 entradas ordenadas DESC.
+    // =========================================================
+    describe('Property 2a — Top-10 cap + orden DESC (N > 10 entradas aleatorias)', () => {
+
+      it('getAll() retorna exactamente 10 entradas para N=11..50 entradas (50 runs)', () => {
+        const RUNS = 50;
+        for (let run = 0; run < RUNS; run++) {
+          const n = randInt(11, 50);
+          const storage = createMockStorage();
+          const mgr = createLeaderboardManager(storage);
+          const entries = shuffle(randEntries(n));
+
+          for (const e of entries) mgr.insert(e);
+
+          const result = mgr.getAll();
+          if (result.length !== 10) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                n,
+                inserted: n,
+                got: result.length,
+                expected: 10,
+                entries: JSON.stringify(entries.slice(0, 5)) + '...',
+                result: JSON.stringify(result)
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS, description: 'Todos los runs retornaron exactamente 10 entradas' } };
+      });
+
+      it('getAll() retorna entradas ordenadas DESC por score (50 runs)', () => {
+        const RUNS = 50;
+        for (let run = 0; run < RUNS; run++) {
+          const n = randInt(11, 40);
+          const storage = createMockStorage();
+          const mgr = createLeaderboardManager(storage);
+          const entries = shuffle(randEntries(n));
+
+          for (const e of entries) mgr.insert(e);
+
+          const result = mgr.getAll();
+          for (let i = 0; i < result.length - 1; i++) {
+            if (result[i].score < result[i + 1].score) {
+              return {
+                passed: false,
+                counterexample: {
+                  run: run + 1,
+                  n,
+                  violation: `result[${i}].score=${result[i].score} < result[${i+1}].score=${result[i+1].score}`,
+                  result: JSON.stringify(result)
+                }
+              };
+            }
+          }
+        }
+        return { passed: true, detail: { runs: RUNS, description: 'Todos los runs retornaron entradas en orden DESC' } };
+      });
+
+      it('getAll() retiene los 10 scores más altos (20 runs)', () => {
+        const RUNS = 20;
+        for (let run = 0; run < RUNS; run++) {
+          const n = randInt(11, 30);
+          const storage = createMockStorage();
+          const mgr = createLeaderboardManager(storage);
+          const entries = randEntries(n);
+          const shuffled = shuffle(entries);
+
+          for (const e of shuffled) mgr.insert(e);
+
+          const result = mgr.getAll();
+          // Los 10 scores más altos del conjunto original
+          const top10Scores = entries.map(e => e.score).sort((a, b) => b - a).slice(0, 10);
+          const resultScores = result.map(e => e.score);
+
+          const match = top10Scores.every((s, i) => s === resultScores[i]);
+          if (!match) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                n,
+                expectedTop10: JSON.stringify(top10Scores),
+                gotScores: JSON.stringify(resultScores)
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS, description: 'Todos los runs retuvieron los 10 scores más altos' } };
+      });
+
+    });
+
+    // =========================================================
+    // PROPERTY 2b — qualifies(S)
+    // Validates: Requirements 3.1, 3.2
+    //
+    // Para cualquier score S, qualifies(S) retorna true si y solo si
+    // getAll().length < 10 OR S > min(getAll().scores).
+    // =========================================================
+    describe('Property 2b — qualifies(S) ↔ length < 10 OR S > min(scores)', () => {
+
+      it('qualifies(S) con tablero vacío siempre retorna true (30 runs)', () => {
+        const RUNS = 30;
+        for (let run = 0; run < RUNS; run++) {
+          const storage = createMockStorage();
+          const mgr = createLeaderboardManager(storage);
+          const s = randInt(0, 99999);
+
+          const q = mgr.qualifies(s);
+          if (!q) {
+            return {
+              passed: false,
+              counterexample: { run: run + 1, score: s, qualifies: q, boardLength: 0 }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+      it('qualifies(S) con tablero parcial (< 10) siempre retorna true (30 runs)', () => {
+        const RUNS = 30;
+        for (let run = 0; run < RUNS; run++) {
+          const storage = createMockStorage();
+          const mgr = createLeaderboardManager(storage);
+          const count = randInt(1, 9);
+          const entries = randEntries(count);
+          for (const e of entries) mgr.insert(e);
+
+          const s = randInt(0, 99999);
+          const q = mgr.qualifies(s);
+          if (!q) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                score: s,
+                qualifies: q,
+                boardLength: mgr.getAll().length,
+                expected: true
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+      it('qualifies(S) con tablero lleno (10): true ↔ S > min(scores) (50 runs)', () => {
+        const RUNS = 50;
+        for (let run = 0; run < RUNS; run++) {
+          const storage = createMockStorage();
+          const mgr = createLeaderboardManager(storage);
+          const entries = randEntries(10);
+          for (const e of entries) mgr.insert(e);
+
+          const board = mgr.getAll();
+          const minScore = board[board.length - 1].score;
+
+          // Probar con score mayor al mínimo
+          const sHigh = minScore + randInt(1, 100);
+          const qHigh = mgr.qualifies(sHigh);
+          if (!qHigh) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                score: sHigh,
+                minScore,
+                qualifies: qHigh,
+                expected: true,
+                reason: 'S > min → debe calificar'
+              }
+            };
+          }
+
+          // Probar con score igual al mínimo (no califica: debe ser estrictamente mayor)
+          const sEqual = minScore;
+          const qEqual = mgr.qualifies(sEqual);
+          if (qEqual) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                score: sEqual,
+                minScore,
+                qualifies: qEqual,
+                expected: false,
+                reason: 'S == min → no debe calificar (no es estrictamente mayor)'
+              }
+            };
+          }
+
+          // Probar con score menor al mínimo
+          if (minScore > 1) {
+            const sLow = randInt(0, minScore - 1);
+            const qLow = mgr.qualifies(sLow);
+            if (qLow) {
+              return {
+                passed: false,
+                counterexample: {
+                  run: run + 1,
+                  score: sLow,
+                  minScore,
+                  qualifies: qLow,
+                  expected: false,
+                  reason: 'S < min → no debe calificar'
+                }
+              };
+            }
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+    });
+
+    // =========================================================
+    // PROPERTY 2c — clear() con contraseña correcta
+    // Validates: Requirements 3.3
+    //
+    // clear('!Talentland') siempre vacía el marcador.
+    // =========================================================
+    describe("Property 2c — clear('!Talentland') siempre vacía el marcador", () => {
+
+      it("clear('!Talentland') retorna true y getAll() retorna [] (30 runs)", () => {
+        const RUNS = 30;
+        for (let run = 0; run < RUNS; run++) {
+          const storage = createMockStorage();
+          const mgr = createLeaderboardManager(storage);
+
+          // Insertar entre 0 y 15 entradas aleatorias
+          const n = randInt(0, 15);
+          const entries = randEntries(n);
+          for (const e of entries) mgr.insert(e);
+
+          const ok = mgr.clear('!Talentland');
+          const after = mgr.getAll();
+
+          if (!ok) {
+            return {
+              passed: false,
+              counterexample: { run: run + 1, n, clearReturnedFalse: true }
+            };
+          }
+          if (after.length !== 0) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                n,
+                afterLength: after.length,
+                after: JSON.stringify(after)
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+    });
+
+    // =========================================================
+    // PROPERTY 2d — clear() con contraseña incorrecta
+    // Validates: Requirements 3.3
+    //
+    // clear(cualquier_otra_string) retorna false y deja los datos intactos.
+    // =========================================================
+    describe('Property 2d — clear(wrong) retorna false y deja datos intactos', () => {
+
+      it('clear con contraseña incorrecta retorna false (40 runs)', () => {
+        const RUNS = 40;
+        const wrongPasswords = [
+          '', 'talentland', '!talentland', 'Talentland', '!Talentland!',
+          ' !Talentland', '!Talentland ', 'wrong', '123456', 'admin',
+          'password', null, undefined, '!TALENTLAND', 'talentLand'
+        ];
+
+        for (let run = 0; run < RUNS; run++) {
+          const storage = createMockStorage();
+          const mgr = createLeaderboardManager(storage);
+
+          const n = randInt(1, 10);
+          const entries = randEntries(n);
+          for (const e of entries) mgr.insert(e);
+
+          const before = mgr.getAll();
+          const pwd = wrongPasswords[run % wrongPasswords.length];
+
+          const ok = mgr.clear(pwd);
+          if (ok !== false) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                password: JSON.stringify(pwd),
+                clearReturned: ok,
+                expected: false
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+      it('clear con contraseña incorrecta deja los datos intactos (30 runs)', () => {
+        const RUNS = 30;
+        const wrongPasswords = [
+          '', 'talentland', '!talentland', 'Talentland', '!Talentland!',
+          'wrong', '123456', 'admin', 'password', '!TALENTLAND'
+        ];
+
+        for (let run = 0; run < RUNS; run++) {
+          const storage = createMockStorage();
+          const mgr = createLeaderboardManager(storage);
+
+          const n = randInt(1, 10);
+          const entries = randEntries(n);
+          for (const e of entries) mgr.insert(e);
+
+          const before = mgr.getAll();
+          const pwd = wrongPasswords[run % wrongPasswords.length];
+
+          mgr.clear(pwd);
+          const after = mgr.getAll();
+
+          if (JSON.stringify(before) !== JSON.stringify(after)) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                password: JSON.stringify(pwd),
+                before: JSON.stringify(before),
+                after: JSON.stringify(after),
+                reason: 'Los datos cambiaron tras clear con contraseña incorrecta'
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+    });
+
+    // =========================================================
+    // PROPERTY 2e — getAll() vacío
+    // Validates: Requirements 3.1
+    //
+    // getAll() con storage vacío retorna [].
+    // =========================================================
+    describe('Property 2e — getAll() con storage vacío retorna []', () => {
+
+      it('getAll() en storage nuevo retorna [] (20 runs)', () => {
+        const RUNS = 20;
+        for (let run = 0; run < RUNS; run++) {
+          const storage = createMockStorage();
+          const mgr = createLeaderboardManager(storage);
+          const result = mgr.getAll();
+
+          if (!Array.isArray(result) || result.length !== 0) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                result: JSON.stringify(result),
+                isArray: Array.isArray(result),
+                length: result.length
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+      it('getAll() tras clear() retorna [] (20 runs)', () => {
+        const RUNS = 20;
+        for (let run = 0; run < RUNS; run++) {
+          const storage = createMockStorage();
+          const mgr = createLeaderboardManager(storage);
+
+          const n = randInt(1, 10);
+          const entries = randEntries(n);
+          for (const e of entries) mgr.insert(e);
+
+          mgr.clear('!Talentland');
+          const result = mgr.getAll();
+
+          if (!Array.isArray(result) || result.length !== 0) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                n,
+                result: JSON.stringify(result)
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+    });
+
+    // =========================================================
+    // PROPERTY 2f — Fallback de red (simulado)
+    // Validates: Requirements 3.5
+    //
+    // Con storage que lanza error en getItem, getAll() retorna []
+    // sin lanzar excepción.
+    // =========================================================
+    describe('Property 2f — Fallback: storage con error en getItem retorna [] sin excepción', () => {
+
+      it('getAll() con storage que lanza en getItem retorna [] (20 runs)', () => {
+        const RUNS = 20;
+        for (let run = 0; run < RUNS; run++) {
+          // Storage que siempre lanza error en getItem (simula fallo de red / storage corrupto)
+          const errorStorage = {
+            getItem(key) { throw new Error('Storage unavailable'); },
+            setItem(key, value) { /* silencioso */ },
+            removeItem(key) { /* silencioso */ },
+            clear() { /* silencioso */ }
+          };
+
+          const mgr = createLeaderboardManager(errorStorage);
+
+          let result;
+          let threw = false;
+          try {
+            result = mgr.getAll();
+          } catch (e) {
+            threw = true;
+          }
+
+          if (threw) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                reason: 'getAll() lanzó una excepción en lugar de retornar []'
+              }
+            };
+          }
+
+          if (!Array.isArray(result) || result.length !== 0) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                result: JSON.stringify(result),
+                reason: 'getAll() no retornó [] con storage fallido'
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+      it('qualifies(S) con storage que lanza en getItem no lanza excepción (20 runs)', () => {
+        const RUNS = 20;
+        for (let run = 0; run < RUNS; run++) {
+          const errorStorage = {
+            getItem(key) { throw new Error('Storage unavailable'); },
+            setItem(key, value) { /* silencioso */ },
+            removeItem(key) { /* silencioso */ },
+            clear() { /* silencioso */ }
+          };
+
+          const mgr = createLeaderboardManager(errorStorage);
+          const s = randInt(0, 99999);
+
+          let threw = false;
+          try {
+            mgr.qualifies(s);
+          } catch (e) {
+            threw = true;
+          }
+
+          if (threw) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1,
+                score: s,
+                reason: 'qualifies() lanzó una excepción con storage fallido'
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+    });
+
+    // =========================================================
+    // ---- SECCIÓN B: fetch-based (implementación corregida) ----
+    // Mismas propiedades que Sección A, pero usando createServerLeaderboardManager.
+    // =========================================================
+
+    // --- Mock server factory (mismo patrón que leaderboard.bug.test.html) ---
+    function createMockServer() {
+      const store = { entries: [] };
+      function mockFetch(url, options = {}) {
+        return Promise.resolve().then(() => {
+          if (url === '/api/scores') {
+            const method = (options.method || 'GET').toUpperCase();
+            if (method === 'GET') {
+              return { ok: true, json: () => Promise.resolve(JSON.parse(JSON.stringify(store.entries))) };
+            }
+            if (method === 'POST') {
+              const body = JSON.parse(options.body);
+              store.entries = Array.isArray(body) ? body : [];
+              return { ok: true, json: () => Promise.resolve({ ok: true }) };
+            }
+            if (method === 'DELETE') {
+              store.entries = [];
+              return { ok: true, json: () => Promise.resolve({ ok: true }) };
+            }
+          }
+          throw new Error('Not found: ' + url);
+        });
+      }
+      return { mockFetch, store };
+    }
+
+    // --- Factory de LeaderboardManager con fetch inyectado ---
+    function createServerLeaderboardManager(fetchFn) {
+      const MAX_ENTRIES = 10;
+      const CLEAR_PASSWORD = '!Talentland';
+      const API_URL = '/api/scores';
+
+      async function _loadAsync() {
+        try {
+          const res = await fetchFn(API_URL);
+          if (!res.ok) return [];
+          return await res.json();
+        } catch (e) { return []; }
+      }
+
+      async function _saveAsync(entries) {
+        try {
+          await fetchFn(API_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(entries),
+          });
+        } catch (e) { /* falla silenciosamente */ }
+      }
+
+      return {
+        async getAll() { return _loadAsync(); },
+        async qualifies(score) {
+          const entries = await _loadAsync();
+          return entries.length < MAX_ENTRIES || score > entries[entries.length - 1].score;
+        },
+        async insert(entry) {
+          const entries = await _loadAsync();
+          entries.push(entry);
+          entries.sort((a, b) => b.score - a.score);
+          if (entries.length > MAX_ENTRIES) entries.pop();
+          await _saveAsync(entries);
+          return entries.findIndex(e =>
+            e === entry ||
+            (e.mote === entry.mote && e.score === entry.score && e.date === entry.date)
+          ) + 1;
+        },
+        async clear(password) {
+          if (password !== CLEAR_PASSWORD) return false;
+          try { await fetchFn(API_URL, { method: 'DELETE' }); } catch (e) { /* silenciar */ }
+          return true;
+        },
+        async getRank(score) {
+          const entries = await _loadAsync();
+          if (entries.length < MAX_ENTRIES || score > entries[entries.length - 1].score) {
+            const idx = entries.findIndex(e => e.score <= score);
+            return idx === -1 ? entries.length + 1 : idx + 1;
+          }
+          return null;
+        }
+      };
+    }
+
+    // Switch to suitesB for Section B tests
+    currentSuites = suitesB;
+
+    // =========================================================
+    // PROPERTY 2a (fetch) — Top-10 cap + orden DESC
+    // Validates: Requirements 3.1, 3.2
+    // =========================================================
+    describe('[fetch] Property 2a — Top-10 cap + orden DESC (N > 10 entradas aleatorias)', () => {
+
+      it('getAll() retorna exactamente 10 entradas para N=11..50 entradas (50 runs)', async () => {
+        const RUNS = 50;
+        for (let run = 0; run < RUNS; run++) {
+          const n = randInt(11, 50);
+          const { mockFetch } = createMockServer();
+          const mgr = createServerLeaderboardManager(mockFetch);
+          const entries = shuffle(randEntries(n));
+
+          for (const e of entries) await mgr.insert(e);
+
+          const result = await mgr.getAll();
+          if (result.length !== 10) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1, n, inserted: n, got: result.length, expected: 10,
+                entries: JSON.stringify(entries.slice(0, 5)) + '...',
+                result: JSON.stringify(result)
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS, description: 'Todos los runs retornaron exactamente 10 entradas' } };
+      });
+
+      it('getAll() retorna entradas ordenadas DESC por score (50 runs)', async () => {
+        const RUNS = 50;
+        for (let run = 0; run < RUNS; run++) {
+          const n = randInt(11, 40);
+          const { mockFetch } = createMockServer();
+          const mgr = createServerLeaderboardManager(mockFetch);
+          const entries = shuffle(randEntries(n));
+
+          for (const e of entries) await mgr.insert(e);
+
+          const result = await mgr.getAll();
+          for (let i = 0; i < result.length - 1; i++) {
+            if (result[i].score < result[i + 1].score) {
+              return {
+                passed: false,
+                counterexample: {
+                  run: run + 1, n,
+                  violation: `result[${i}].score=${result[i].score} < result[${i+1}].score=${result[i+1].score}`,
+                  result: JSON.stringify(result)
+                }
+              };
+            }
+          }
+        }
+        return { passed: true, detail: { runs: RUNS, description: 'Todos los runs retornaron entradas en orden DESC' } };
+      });
+
+      it('getAll() retiene los 10 scores más altos (20 runs)', async () => {
+        const RUNS = 20;
+        for (let run = 0; run < RUNS; run++) {
+          const n = randInt(11, 30);
+          const { mockFetch } = createMockServer();
+          const mgr = createServerLeaderboardManager(mockFetch);
+          const entries = randEntries(n);
+          const shuffled = shuffle(entries);
+
+          for (const e of shuffled) await mgr.insert(e);
+
+          const result = await mgr.getAll();
+          const top10Scores = entries.map(e => e.score).sort((a, b) => b - a).slice(0, 10);
+          const resultScores = result.map(e => e.score);
+
+          const match = top10Scores.every((s, i) => s === resultScores[i]);
+          if (!match) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1, n,
+                expectedTop10: JSON.stringify(top10Scores),
+                gotScores: JSON.stringify(resultScores)
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS, description: 'Todos los runs retuvieron los 10 scores más altos' } };
+      });
+
+    });
+
+    // =========================================================
+    // PROPERTY 2b (fetch) — qualifies(S)
+    // Validates: Requirements 3.1, 3.2
+    // =========================================================
+    describe('[fetch] Property 2b — qualifies(S) ↔ length < 10 OR S > min(scores)', () => {
+
+      it('qualifies(S) con tablero vacío siempre retorna true (30 runs)', async () => {
+        const RUNS = 30;
+        for (let run = 0; run < RUNS; run++) {
+          const { mockFetch } = createMockServer();
+          const mgr = createServerLeaderboardManager(mockFetch);
+          const s = randInt(0, 99999);
+
+          const q = await mgr.qualifies(s);
+          if (!q) {
+            return { passed: false, counterexample: { run: run + 1, score: s, qualifies: q, boardLength: 0 } };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+      it('qualifies(S) con tablero parcial (< 10) siempre retorna true (30 runs)', async () => {
+        const RUNS = 30;
+        for (let run = 0; run < RUNS; run++) {
+          const { mockFetch } = createMockServer();
+          const mgr = createServerLeaderboardManager(mockFetch);
+          const count = randInt(1, 9);
+          const entries = randEntries(count);
+          for (const e of entries) await mgr.insert(e);
+
+          const s = randInt(0, 99999);
+          const q = await mgr.qualifies(s);
+          if (!q) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1, score: s, qualifies: q,
+                boardLength: (await mgr.getAll()).length, expected: true
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+      it('qualifies(S) con tablero lleno (10): true ↔ S > min(scores) (50 runs)', async () => {
+        const RUNS = 50;
+        for (let run = 0; run < RUNS; run++) {
+          const { mockFetch } = createMockServer();
+          const mgr = createServerLeaderboardManager(mockFetch);
+          const entries = randEntries(10);
+          for (const e of entries) await mgr.insert(e);
+
+          const board = await mgr.getAll();
+          const minScore = board[board.length - 1].score;
+
+          const sHigh = minScore + randInt(1, 100);
+          const qHigh = await mgr.qualifies(sHigh);
+          if (!qHigh) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1, score: sHigh, minScore, qualifies: qHigh,
+                expected: true, reason: 'S > min → debe calificar'
+              }
+            };
+          }
+
+          const sEqual = minScore;
+          const qEqual = await mgr.qualifies(sEqual);
+          if (qEqual) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1, score: sEqual, minScore, qualifies: qEqual,
+                expected: false, reason: 'S == min → no debe calificar'
+              }
+            };
+          }
+
+          if (minScore > 1) {
+            const sLow = randInt(0, minScore - 1);
+            const qLow = await mgr.qualifies(sLow);
+            if (qLow) {
+              return {
+                passed: false,
+                counterexample: {
+                  run: run + 1, score: sLow, minScore, qualifies: qLow,
+                  expected: false, reason: 'S < min → no debe calificar'
+                }
+              };
+            }
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+    });
+
+    // =========================================================
+    // PROPERTY 2c (fetch) — clear() con contraseña correcta
+    // Validates: Requirements 3.3
+    // =========================================================
+    describe("[fetch] Property 2c — clear('!Talentland') siempre vacía el marcador", () => {
+
+      it("clear('!Talentland') retorna true y getAll() retorna [] (30 runs)", async () => {
+        const RUNS = 30;
+        for (let run = 0; run < RUNS; run++) {
+          const { mockFetch } = createMockServer();
+          const mgr = createServerLeaderboardManager(mockFetch);
+
+          const n = randInt(0, 15);
+          const entries = randEntries(n);
+          for (const e of entries) await mgr.insert(e);
+
+          const ok = await mgr.clear('!Talentland');
+          const after = await mgr.getAll();
+
+          if (!ok) {
+            return { passed: false, counterexample: { run: run + 1, n, clearReturnedFalse: true } };
+          }
+          if (after.length !== 0) {
+            return {
+              passed: false,
+              counterexample: { run: run + 1, n, afterLength: after.length, after: JSON.stringify(after) }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+    });
+
+    // =========================================================
+    // PROPERTY 2d (fetch) — clear() con contraseña incorrecta
+    // Validates: Requirements 3.3
+    // =========================================================
+    describe('[fetch] Property 2d — clear(wrong) retorna false y deja datos intactos', () => {
+
+      it('clear con contraseña incorrecta retorna false (40 runs)', async () => {
+        const RUNS = 40;
+        const wrongPasswords = [
+          '', 'talentland', '!talentland', 'Talentland', '!Talentland!',
+          ' !Talentland', '!Talentland ', 'wrong', '123456', 'admin',
+          'password', null, undefined, '!TALENTLAND', 'talentLand'
+        ];
+
+        for (let run = 0; run < RUNS; run++) {
+          const { mockFetch } = createMockServer();
+          const mgr = createServerLeaderboardManager(mockFetch);
+
+          const n = randInt(1, 10);
+          const entries = randEntries(n);
+          for (const e of entries) await mgr.insert(e);
+
+          const pwd = wrongPasswords[run % wrongPasswords.length];
+          const ok = await mgr.clear(pwd);
+          if (ok !== false) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1, password: JSON.stringify(pwd),
+                clearReturned: ok, expected: false
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+      it('clear con contraseña incorrecta deja los datos intactos (30 runs)', async () => {
+        const RUNS = 30;
+        const wrongPasswords = [
+          '', 'talentland', '!talentland', 'Talentland', '!Talentland!',
+          'wrong', '123456', 'admin', 'password', '!TALENTLAND'
+        ];
+
+        for (let run = 0; run < RUNS; run++) {
+          const { mockFetch } = createMockServer();
+          const mgr = createServerLeaderboardManager(mockFetch);
+
+          const n = randInt(1, 10);
+          const entries = randEntries(n);
+          for (const e of entries) await mgr.insert(e);
+
+          const before = await mgr.getAll();
+          const pwd = wrongPasswords[run % wrongPasswords.length];
+
+          await mgr.clear(pwd);
+          const after = await mgr.getAll();
+
+          if (JSON.stringify(before) !== JSON.stringify(after)) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1, password: JSON.stringify(pwd),
+                before: JSON.stringify(before), after: JSON.stringify(after),
+                reason: 'Los datos cambiaron tras clear con contraseña incorrecta'
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+    });
+
+    // =========================================================
+    // PROPERTY 2e (fetch) — getAll() vacío
+    // Validates: Requirements 3.1
+    // =========================================================
+    describe('[fetch] Property 2e — getAll() con servidor vacío retorna []', () => {
+
+      it('getAll() en servidor nuevo retorna [] (20 runs)', async () => {
+        const RUNS = 20;
+        for (let run = 0; run < RUNS; run++) {
+          const { mockFetch } = createMockServer();
+          const mgr = createServerLeaderboardManager(mockFetch);
+          const result = await mgr.getAll();
+
+          if (!Array.isArray(result) || result.length !== 0) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1, result: JSON.stringify(result),
+                isArray: Array.isArray(result), length: result.length
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+      it('getAll() tras clear() retorna [] (20 runs)', async () => {
+        const RUNS = 20;
+        for (let run = 0; run < RUNS; run++) {
+          const { mockFetch } = createMockServer();
+          const mgr = createServerLeaderboardManager(mockFetch);
+
+          const n = randInt(1, 10);
+          const entries = randEntries(n);
+          for (const e of entries) await mgr.insert(e);
+
+          await mgr.clear('!Talentland');
+          const result = await mgr.getAll();
+
+          if (!Array.isArray(result) || result.length !== 0) {
+            return {
+              passed: false,
+              counterexample: { run: run + 1, n, result: JSON.stringify(result) }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+    });
+
+    // =========================================================
+    // PROPERTY 2f (fetch) — Fallback de red
+    // Validates: Requirements 3.5
+    //
+    // Con fetch que lanza error, getAll() retorna [] sin lanzar excepción.
+    // =========================================================
+    describe('[fetch] Property 2f — Fallback: fetch con error retorna [] sin excepción', () => {
+
+      it('getAll() con fetch que lanza retorna [] (20 runs)', async () => {
+        const RUNS = 20;
+        for (let run = 0; run < RUNS; run++) {
+          const errorFetch = () => Promise.reject(new Error('Network unavailable'));
+          const mgr = createServerLeaderboardManager(errorFetch);
+
+          let result;
+          let threw = false;
+          try {
+            result = await mgr.getAll();
+          } catch (e) {
+            threw = true;
+          }
+
+          if (threw) {
+            return {
+              passed: false,
+              counterexample: { run: run + 1, reason: 'getAll() lanzó una excepción en lugar de retornar []' }
+            };
+          }
+          if (!Array.isArray(result) || result.length !== 0) {
+            return {
+              passed: false,
+              counterexample: {
+                run: run + 1, result: JSON.stringify(result),
+                reason: 'getAll() no retornó [] con fetch fallido'
+              }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+      it('qualifies(S) con fetch que lanza no lanza excepción (20 runs)', async () => {
+        const RUNS = 20;
+        for (let run = 0; run < RUNS; run++) {
+          const errorFetch = () => Promise.reject(new Error('Network unavailable'));
+          const mgr = createServerLeaderboardManager(errorFetch);
+          const s = randInt(0, 99999);
+
+          let threw = false;
+          try {
+            await mgr.qualifies(s);
+          } catch (e) {
+            threw = true;
+          }
+
+          if (threw) {
+            return {
+              passed: false,
+              counterexample: { run: run + 1, score: s, reason: 'qualifies() lanzó una excepción con fetch fallido' }
+            };
+          }
+        }
+        return { passed: true, detail: { runs: RUNS } };
+      });
+
+    });
+
+    // =========================================================
+    // Render results (async-aware)
+    // =========================================================
+    function renderSuites(suites, container) {
+      let passed = 0, failed = 0;
+      suites.forEach(suite => {
+        const suiteEl = document.createElement('div');
+        suiteEl.className = 'suite';
+
+        const title = document.createElement('h2');
+        title.textContent = suite.name;
+        suiteEl.appendChild(title);
+
+        suite.tests.forEach(test => {
+          const testEl = document.createElement('div');
+          testEl.className = 'test';
+          const status = test.passed ? '✅ PASS' : '❌ FAIL';
+          const statusClass = test.passed ? 'pass' : 'fail';
+          testEl.innerHTML = `<span class="${statusClass}">${status}</span> <span class="label">${test.name}</span>`;
+
+          if (test.passed) { passed++; } else { failed++; }
+
+          if (test.error) {
+            const errEl = document.createElement('div');
+            errEl.className = 'counterexample';
+            errEl.textContent = `Error: ${test.error}`;
+            testEl.appendChild(errEl);
+          }
+          if (test.counterexample) {
+            const ceEl = document.createElement('div');
+            ceEl.className = 'counterexample';
+            ceEl.innerHTML = '<strong>Contraejemplo:</strong><br>' +
+              Object.entries(test.counterexample).map(([k, v]) => `  ${k}: ${v}`).join('<br>');
+            testEl.appendChild(ceEl);
+          }
+          if (test.detail) {
+            const detEl = document.createElement('div');
+            detEl.className = 'detail';
+            detEl.innerHTML = Object.entries(test.detail).map(([k, v]) => `  ${k}: ${v}`).join('<br>');
+            testEl.appendChild(detEl);
+          }
+          suiteEl.appendChild(testEl);
+        });
+        container.appendChild(suiteEl);
+      });
+      return { passed, failed };
+    }
+
+    async function renderResults() {
+      // Resolve async tests in both sections
+      for (const suites of [suitesA, suitesB]) {
+        for (const suite of suites) {
+          for (const test of suite.tests) {
+            if (test._promise) {
+              const result = await test._promise;
+              test.passed = result.passed;
+              test.error = result.error;
+              test.counterexample = result.counterexample;
+              test.detail = result.detail;
+              delete test._promise;
+            }
+          }
+        }
+      }
+
+      // Section A header
+      const containerA = document.getElementById('results-a');
+      const headerA = document.createElement('h2');
+      headerA.style.cssText = 'color:#00ffff; margin:1.5rem 0 0.5rem; font-size:0.95rem;';
+      headerA.textContent = '── SECCIÓN A: localStorage-based (baseline original) ──';
+      containerA.appendChild(headerA);
+      const { passed: pA, failed: fA } = renderSuites(suitesA, containerA);
+
+      const sectionAStatus = document.createElement('p');
+      sectionAStatus.style.cssText = `color:${fA === 0 ? '#00ff41' : '#ff4444'}; margin:0.5rem 0 1rem; font-size:0.85em;`;
+      sectionAStatus.textContent = fA === 0
+        ? `✅ Sección A: ${pA} PASS / 0 FAIL — baseline confirmado`
+        : `❌ Sección A: ${pA} PASS / ${fA} FAIL — revisar contraejemplos`;
+      containerA.appendChild(sectionAStatus);
+
+      // Section B header
+      const containerB = document.getElementById('results-b');
+      const headerB = document.createElement('h2');
+      headerB.style.cssText = 'color:#ff00ff; margin:1.5rem 0 0.5rem; font-size:0.95rem;';
+      headerB.textContent = '── SECCIÓN B: fetch-based (implementación corregida) ──';
+      containerB.appendChild(headerB);
+      const { passed: pB, failed: fB } = renderSuites(suitesB, containerB);
+
+      const sectionBStatus = document.createElement('p');
+      sectionBStatus.style.cssText = `color:${fB === 0 ? '#00ff41' : '#ff4444'}; margin:0.5rem 0 1rem; font-size:0.85em;`;
+      sectionBStatus.textContent = fB === 0
+        ? `✅ Sección B: ${pB} PASS / 0 FAIL — sin regresiones`
+        : `❌ Sección B: ${pB} PASS / ${fB} FAIL — regresiones detectadas`;
+      containerB.appendChild(sectionBStatus);
+
+      // Global summary
+      const totalPassed = pA + pB;
+      const totalFailed = fA + fB;
+      const total = totalPassed + totalFailed;
+      const allPassed = totalFailed === 0;
+
+      const summaryEl = document.getElementById('summary');
+      summaryEl.innerHTML = `
+        <div class="summary">
+          <h2>&#9654; RESUMEN GLOBAL</h2>
+          <p>Total: ${total} prueba(s) &nbsp;|&nbsp;
+             <span class="pass">PASS: ${totalPassed}</span> &nbsp;|&nbsp;
+             <span class="fail">FAIL: ${totalFailed}</span></p>
+          <p style="margin-top:0.75rem; color: ${allPassed ? '#00ff41' : '#ff4444'}">
+            ${allPassed
+              ? '✅ RESULTADO ESPERADO: Todas las pruebas PASAN — baseline confirmado ✅ y sin regresiones ✅'
+              : '❌ REGRESIONES DETECTADAS — revisar los contraejemplos de la Sección B'}
+          </p>
+          <p style="margin-top:0.5rem; font-size:0.85em; color:#aaa">
+            Sección A (localStorage): ${pA} PASS / ${fA} FAIL &nbsp;|&nbsp;
+            Sección B (fetch): ${pB} PASS / ${fB} FAIL
+          </p>
+          <p class="note" style="margin-top:0.5rem">
+            Tareas 2 y 3.5 &nbsp;|&nbsp; Spec: unified-scoreboard &nbsp;|&nbsp;
+            Tipo: Property-Based Tests (HTML puro) &nbsp;|&nbsp;
+            Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5
+          </p>
+        </div>
+      `;
+    }
+
+    renderResults();
+  </script>
+</body>
+</html>

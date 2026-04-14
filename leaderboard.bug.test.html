@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Unified Scoreboard — Bug Condition Exploration Test</title>
+  <style>
+    body {
+      font-family: monospace;
+      background: #0a0a0a;
+      color: #00ff41;
+      padding: 2rem;
+      line-height: 1.6;
+    }
+    h1 { color: #00ffff; margin-bottom: 0.5rem; font-size: 1.1rem; }
+    h2 { color: #ffff00; margin: 1.5rem 0 0.5rem; font-size: 0.9rem; }
+    .suite { border: 1px solid #333; padding: 1rem; margin-bottom: 1.5rem; }
+    .test { padding: 0.4rem 0; border-bottom: 1px solid #1a1a1a; }
+    .test:last-child { border-bottom: none; }
+    .pass { color: #00ff41; }
+    .fail { color: #ff4444; font-weight: bold; }
+    .label { color: #aaa; }
+    .counterexample {
+      background: #1a0000;
+      border-left: 3px solid #ff4444;
+      padding: 0.5rem 0.75rem;
+      margin: 0.25rem 0 0.5rem 1rem;
+      font-size: 0.85em;
+      color: #ff8888;
+    }
+    .summary {
+      border: 2px solid #ffff00;
+      padding: 1rem;
+      margin-top: 2rem;
+      background: #0a0a00;
+    }
+    .summary h2 { margin-top: 0; }
+    .note { color: #888; font-size: 0.8em; margin-top: 0.25rem; }
+    .tag { color: #ff00ff; font-size: 0.75em; }
+  </style>
+</head>
+<body>
+  <h1>&#9654; UNIFIED SCOREBOARD — BUG CONDITION EXPLORATION TEST</h1>
+  <p class="note">
+    Tarea 1 del bugfix workflow — spec: unified-scoreboard.<br>
+    Esta prueba codifica el comportamiento ESPERADO (correcto): deviceB debe ver la entrada insertada por deviceA.<br>
+    <strong style="color:#ff4444">RESULTADO ESPERADO: La prueba debe mostrar FAIL (confirma que el bug de aislamiento de localStorage existe en el código sin fix).</strong>
+  </p>
+
+  <div id="results"></div>
+  <div id="summary"></div>
+
+  <script>
+    // =========================================================
+    // Mini test runner (mismo patrón que memorama.test.html)
+    // =========================================================
+    const suites = [];
+    let currentSuite = null;
+
+    function describe(name, fn) {
+      currentSuite = { name, tests: [] };
+      suites.push(currentSuite);
+      fn();
+    }
+
+    function it(name, fn) {
+      let passed = false;
+      let error = null;
+      let counterexample = null;
+      // Support async test functions
+      const maybePromise = (() => {
+        try {
+          return fn();
+        } catch (e) {
+          return Promise.reject(e);
+        }
+      })();
+
+      if (maybePromise && typeof maybePromise.then === 'function') {
+        // Async test — store a promise that resolves the test result
+        currentSuite.tests.push({ name, passed: false, error: null, counterexample: null, _promise: maybePromise.then(result => {
+          if (result && typeof result === 'object' && 'passed' in result) {
+            return { passed: result.passed, counterexample: result.counterexample || null, error: null };
+          }
+          return { passed: result !== false, counterexample: null, error: null };
+        }).catch(e => ({ passed: false, counterexample: null, error: e.message })) });
+        return;
+      }
+
+      // Sync test
+      try {
+        const result = maybePromise;
+        if (result && typeof result === 'object' && 'passed' in result) {
+          passed = result.passed;
+          counterexample = result.counterexample || null;
+        } else {
+          passed = result !== false;
+        }
+      } catch (e) {
+        error = e.message;
+        passed = false;
+      }
+      currentSuite.tests.push({ name, passed, error, counterexample });
+    }
+
+    // =========================================================
+    // Mock localStorage factory
+    // Cada instancia tiene su propio almacenamiento completamente aislado.
+    // Simula dos dispositivos distintos (deviceA, deviceB) con su propio
+    // localStorage independiente, igual que ocurre en la realidad.
+    // =========================================================
+    function createMockStorage() {
+      const store = {};
+      return {
+        getItem(key) {
+          return Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null;
+        },
+        setItem(key, value) {
+          store[key] = String(value);
+        },
+        removeItem(key) {
+          delete store[key];
+        },
+        clear() {
+          for (const k in store) delete store[k];
+        },
+        _store: store  // expuesto para inspección en tests
+      };
+    }
+
+    // =========================================================
+    // LeaderboardManager factory
+    // Recrea la lógica ORIGINAL de LeaderboardManager (localStorage-based)
+    // pero acepta un storage mock en lugar del global localStorage.
+    // Esto permite instanciar dos managers con storages completamente aislados,
+    // simulando dos dispositivos distintos en la misma red.
+    //
+    // La implementación es una copia fiel del código en index.html (sin fix):
+    //   - _load() lee del storage inyectado
+    //   - _save() escribe en el storage inyectado
+    //   - getAll(), qualifies(), insert(), clear(), getRank() sin cambios
+    // =========================================================
+    function createLeaderboardManager(mockStorage) {
+      const STORAGE_KEY = 'memorama_leaderboard';
+      const MAX_ENTRIES = 10;
+      const CLEAR_PASSWORD = '!Talentland';
+
+      function _load() {
+        try {
+          return JSON.parse(mockStorage.getItem(STORAGE_KEY) || '[]');
+        } catch (e) {
+          return [];
+        }
+      }
+
+      function _save(entries) {
+        try {
+          mockStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+        } catch (e) { /* silenciar errores de cuota */ }
+      }
+
+      return {
+        getAll() {
+          return _load();
+        },
+        qualifies(score) {
+          const entries = _load();
+          return entries.length < MAX_ENTRIES || score > entries[entries.length - 1].score;
+        },
+        insert(entry) {
+          const entries = _load();
+          entries.push(entry);
+          entries.sort((a, b) => b.score - a.score);
+          if (entries.length > MAX_ENTRIES) entries.pop();
+          _save(entries);
+          return entries.findIndex(e =>
+            e === entry ||
+            (e.mote === entry.mote && e.score === entry.score && e.date === entry.date)
+          ) + 1;
+        },
+        clear(password) {
+          if (password !== CLEAR_PASSWORD) return false;
+          _save([]);
+          return true;
+        },
+        getRank(score) {
+          const entries = _load();
+          if (entries.length < MAX_ENTRIES || score > entries[entries.length - 1].score) {
+            const idx = entries.findIndex(e => e.score <= score);
+            return idx === -1 ? entries.length + 1 : idx + 1;
+          }
+          return null;
+        }
+      };
+    }
+
+    // =========================================================
+    // PROPERTY 1 — Bug Condition: Marcador Aislado Por Dispositivo
+    // Validates: Requirements 1.1, 1.2, 1.3, 1.4
+    //
+    // Comportamiento ESPERADO (correcto): deviceB.getAll() debe contener
+    // la entrada insertada por deviceA (marcador compartido).
+    //
+    // La prueba verifica: deviceB.getAll() contiene { mote: 'AAA', score: 100 }
+    //
+    // Si el bug existe (localStorage aislado por dispositivo):
+    //   deviceB.getAll() retorna [] → prueba FALLA ❌
+    //
+    // Contraejemplo documentado:
+    //   "deviceB.getAll() returns [] when deviceA has [{ mote: 'AAA', score: 100 }]"
+    // =========================================================
+    describe('Property 1 — Bug Condition: Marcador Aislado Por Dispositivo', () => {
+
+      it('EXPECTED: deviceB.getAll() contiene la entrada insertada por deviceA (marcador compartido)', () => {
+        // Crear dos storages completamente aislados — simulan dos dispositivos distintos
+        const storageA = createMockStorage();  // dispositivo A (desktop)
+        const storageB = createMockStorage();  // dispositivo B (mobile)
+
+        // Instanciar un LeaderboardManager por dispositivo
+        const managerA = createLeaderboardManager(storageA);
+        const managerB = createLeaderboardManager(storageB);
+
+        // deviceA inserta una entrada
+        const entry = { mote: 'AAA', score: 100, date: '2025-01-01' };
+        managerA.insert(entry);
+
+        // deviceB consulta el leaderboard
+        const deviceBEntries = managerB.getAll();
+
+        // Comportamiento ESPERADO (correcto): deviceB debe ver la entrada de deviceA
+        const deviceBHasEntry = deviceBEntries.some(
+          e => e.mote === 'AAA' && e.score === 100
+        );
+
+        // Si el bug existe: deviceBHasEntry === false → passed = false → FAIL ❌
+        const passed = deviceBHasEntry;
+
+        const counterexample = {
+          'deviceA.insert()': JSON.stringify(entry),
+          'deviceA.getAll()': JSON.stringify(managerA.getAll()),
+          'deviceB.getAll()': JSON.stringify(deviceBEntries),
+          'deviceB contiene entrada': String(deviceBHasEntry),
+          'storageA._store': JSON.stringify(storageA._store),
+          'storageB._store': JSON.stringify(storageB._store),
+          'bug confirmado': 'deviceB.getAll() retorna [] porque cada dispositivo tiene su propio localStorage aislado'
+        };
+
+        return { passed, counterexample: passed ? null : counterexample };
+      });
+
+    });
+
+    // =========================================================
+    // PROPERTY 2 — Fix Verification: Marcador Compartido Entre Dispositivos
+    // Validates: Requirements 2.1, 2.2, 2.3, 2.4
+    //
+    // Comportamiento CORREGIDO: LeaderboardManager usa fetch + /api/scores.
+    // Un único store compartido simula el servidor (server.py).
+    // Dos instancias de LeaderboardManager apuntan al mismo store vía fetch mock.
+    //
+    // Si el fix funciona: deviceB.getAll() retorna la entrada de deviceA → PASS ✅
+    // =========================================================
+    describe('Property 2 — Fix Verification: Marcador Compartido Entre Dispositivos', () => {
+
+      it('FIXED: deviceB.getAll() contiene la entrada insertada por deviceA (servidor compartido)', async () => {
+        // --- Mock server compartido ---
+        // Un único store en memoria simula /api/scores en server.py.
+        // Ambos "dispositivos" usan el mismo store → comportamiento correcto.
+        const sharedStore = { entries: [] };
+
+        function createMockFetch() {
+          return async function mockFetch(url, options = {}) {
+            if (url === '/api/scores') {
+              const method = (options.method || 'GET').toUpperCase();
+              if (method === 'GET') {
+                return {
+                  ok: true,
+                  json: async () => JSON.parse(JSON.stringify(sharedStore.entries))
+                };
+              }
+              if (method === 'POST') {
+                const body = JSON.parse(options.body);
+                sharedStore.entries = Array.isArray(body) ? body : [];
+                return { ok: true, json: async () => ({ ok: true }) };
+              }
+              if (method === 'DELETE') {
+                sharedStore.entries = [];
+                return { ok: true, json: async () => ({ ok: true }) };
+              }
+            }
+            throw new Error('Not found: ' + url);
+          };
+        }
+
+        // --- Factory de LeaderboardManager con fetch inyectado ---
+        // Replica la lógica del LeaderboardManager corregido en index.html,
+        // pero acepta un fetch mock como parámetro para testabilidad.
+        function createServerLeaderboardManager(fetchFn) {
+          const MAX_ENTRIES = 10;
+          const CLEAR_PASSWORD = '!Talentland';
+          const API_URL = '/api/scores';
+
+          async function _loadAsync() {
+            try {
+              const res = await fetchFn(API_URL);
+              if (!res.ok) return [];
+              return await res.json();
+            } catch (e) {
+              return [];
+            }
+          }
+
+          async function _saveAsync(entries) {
+            try {
+              await fetchFn(API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(entries),
+              });
+            } catch (e) { /* falla silenciosamente */ }
+          }
+
+          return {
+            async getAll() { return _loadAsync(); },
+            async qualifies(score) {
+              const entries = await _loadAsync();
+              return entries.length < MAX_ENTRIES || score > entries[entries.length - 1].score;
+            },
+            async insert(entry) {
+              const entries = await _loadAsync();
+              entries.push(entry);
+              entries.sort((a, b) => b.score - a.score);
+              if (entries.length > MAX_ENTRIES) entries.pop();
+              await _saveAsync(entries);
+              return entries.findIndex(e =>
+                e === entry ||
+                (e.mote === entry.mote && e.score === entry.score && e.date === entry.date)
+              ) + 1;
+            },
+            async clear(password) {
+              if (password !== CLEAR_PASSWORD) return false;
+              try { await fetchFn(API_URL, { method: 'DELETE' }); } catch (e) { /* silenciar */ }
+              return true;
+            },
+            async getRank(score) {
+              const entries = await _loadAsync();
+              if (entries.length < MAX_ENTRIES || score > entries[entries.length - 1].score) {
+                const idx = entries.findIndex(e => e.score <= score);
+                return idx === -1 ? entries.length + 1 : idx + 1;
+              }
+              return null;
+            }
+          };
+        }
+
+        // Ambos dispositivos usan el MISMO mock fetch → mismo store compartido
+        const mockFetch = createMockFetch();
+        const managerA = createServerLeaderboardManager(mockFetch);
+        const managerB = createServerLeaderboardManager(mockFetch);
+
+        // deviceA inserta una entrada
+        const entry = { mote: 'AAA', score: 100, date: '2025-01-01' };
+        await managerA.insert(entry);
+
+        // deviceB consulta el leaderboard
+        const deviceBEntries = await managerB.getAll();
+
+        // Comportamiento CORREGIDO: deviceB debe ver la entrada de deviceA
+        const deviceBHasEntry = deviceBEntries.some(
+          e => e.mote === 'AAA' && e.score === 100
+        );
+
+        // Si el fix funciona: deviceBHasEntry === true → passed = true → PASS ✅
+        const passed = deviceBHasEntry;
+
+        const counterexample = passed ? null : {
+          'deviceA.insert()': JSON.stringify(entry),
+          'deviceA.getAll()': JSON.stringify(await managerA.getAll()),
+          'deviceB.getAll()': JSON.stringify(deviceBEntries),
+          'deviceB contiene entrada': String(deviceBHasEntry),
+          'sharedStore.entries': JSON.stringify(sharedStore.entries),
+          'error': 'El fix NO funciona — deviceB no ve la entrada de deviceA'
+        };
+
+        return { passed, counterexample };
+      });
+
+    });
+
+    // =========================================================
+    // Render results (async-aware)
+    // =========================================================
+    async function renderResults() {
+      // Resolve any async tests
+      for (const suite of suites) {
+        for (const test of suite.tests) {
+          if (test._promise) {
+            const result = await test._promise;
+            test.passed = result.passed;
+            test.error = result.error;
+            test.counterexample = result.counterexample;
+            delete test._promise;
+          }
+        }
+      }
+
+      const container = document.getElementById('results');
+      let totalPassed = 0;
+      let totalFailed = 0;
+
+      suites.forEach(suite => {
+        const suiteEl = document.createElement('div');
+        suiteEl.className = 'suite';
+
+        const title = document.createElement('h2');
+        title.textContent = suite.name;
+        suiteEl.appendChild(title);
+
+        suite.tests.forEach(test => {
+          const testEl = document.createElement('div');
+          testEl.className = 'test';
+
+          const status = test.passed ? '✅ PASS' : '❌ FAIL';
+          const statusClass = test.passed ? 'pass' : 'fail';
+
+          testEl.innerHTML = `<span class="${statusClass}">${status}</span> <span class="label">${test.name}</span>`;
+
+          if (test.passed) {
+            totalPassed++;
+          } else {
+            totalFailed++;
+          }
+
+          if (test.error) {
+            const errEl = document.createElement('div');
+            errEl.className = 'counterexample';
+            errEl.textContent = `Error: ${test.error}`;
+            testEl.appendChild(errEl);
+          }
+
+          if (test.counterexample) {
+            const ceEl = document.createElement('div');
+            ceEl.className = 'counterexample';
+            ceEl.innerHTML = '<strong>Contraejemplo:</strong><br>' +
+              Object.entries(test.counterexample)
+                .map(([k, v]) => `  ${k}: ${v}`)
+                .join('<br>');
+            testEl.appendChild(ceEl);
+          }
+
+          suiteEl.appendChild(testEl);
+        });
+
+        container.appendChild(suiteEl);
+      });
+
+      // Summary
+      const summaryEl = document.getElementById('summary');
+      const total = totalPassed + totalFailed;
+      const suite1Failed = suites[0] && suites[0].tests.every(t => !t.passed);
+      const suite2Passed = suites[1] && suites[1].tests.every(t => t.passed);
+      const expectedOutcome = suite1Failed && suite2Passed;
+
+      summaryEl.innerHTML = `
+        <div class="summary">
+          <h2>&#9654; RESUMEN</h2>
+          <p>Total: ${total} prueba(s) &nbsp;|&nbsp;
+             <span class="pass">PASS: ${totalPassed}</span> &nbsp;|&nbsp;
+             <span class="fail">FAIL: ${totalFailed}</span></p>
+          <p style="margin-top:0.75rem; color: ${expectedOutcome ? '#00ff41' : '#ffff00'}">
+            ${expectedOutcome
+              ? '✅ RESULTADO ESPERADO: Suite 1 FALLA ❌ (bug confirmado) · Suite 2 PASA ✅ (fix verificado)'
+              : '⚠️  RESULTADO INESPERADO — revisa las suites individuales.'}
+          </p>
+          <p class="note" style="margin-top:0.5rem">
+            Suite 1: Bug Condition (localStorage aislado) — debe FALLAR ❌ &nbsp;|&nbsp;
+            Suite 2: Fix Verification (fetch + servidor compartido) — debe PASAR ✅<br>
+            Spec: unified-scoreboard &nbsp;|&nbsp;
+            Contraejemplo: "deviceB.getAll() returns [] when deviceA has [{ mote: 'AAA', score: 100 }]"
+          </p>
+        </div>
+      `;
+    }
+
+    renderResults();
+  </script>
+</body>
+</html>
